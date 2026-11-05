@@ -1,0 +1,636 @@
+{
+  "name": "HRIS Lifecycle -> Identity Provisioning (AI Router)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "hris-lifecycle",
+        "authentication": "headerAuth",
+        "options": {}
+      },
+      "id": "hris-webhook",
+      "name": "HRIS Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "notes": "Point Workday/BambooHR/HiBob webhook here. Protect with header auth."
+    },
+    {
+      "parameters": {
+        "jsCode": "const b = $json.body ?? $json;\nreturn [{ json: { source: b.source ?? 'unknown', received_at: new Date().toISOString(), raw: b, raw_text: JSON.stringify(b) } }];"
+      },
+      "id": "normalize-payload",
+      "name": "Normalize Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "text": "={{ $json.raw_text }}",
+        "attributes": {
+          "attributes": [
+            {
+              "name": "event_type",
+              "type": "string",
+              "description": "One of: new_hire, transfer, termination",
+              "required": true
+            },
+            {
+              "name": "employee_id",
+              "type": "string",
+              "description": "HRIS worker ID",
+              "required": true
+            },
+            {
+              "name": "first_name",
+              "type": "string",
+              "description": "Given name",
+              "required": true
+            },
+            {
+              "name": "last_name",
+              "type": "string",
+              "description": "Family name",
+              "required": true
+            },
+            {
+              "name": "work_email",
+              "type": "string",
+              "description": "Corporate email if present, else empty",
+              "required": false
+            },
+            {
+              "name": "department",
+              "type": "string",
+              "description": "Department (new/target department for transfers)",
+              "required": false
+            },
+            {
+              "name": "job_title",
+              "type": "string",
+              "description": "Job title",
+              "required": false
+            },
+            {
+              "name": "manager_email",
+              "type": "string",
+              "description": "Manager email",
+              "required": false
+            },
+            {
+              "name": "effective_date",
+              "type": "string",
+              "description": "ISO date the change takes effect",
+              "required": false
+            },
+            {
+              "name": "confidence",
+              "type": "number",
+              "description": "0 to 1 confidence in event_type and field mapping",
+              "required": true
+            }
+          ]
+        },
+        "options": {
+          "systemPromptTemplate": "You map raw HRIS lifecycle payloads (Workday, BambooHR, HiBob, etc.) to a canonical schema. Never invent values; leave unknown fields empty. Map hire/rehire/onboard -> new_hire; job change/org change/department change -> transfer; terminate/separation/offboard -> termination. Lower confidence when the event type is ambiguous."
+        }
+      },
+      "id": "ai-classify-&-map",
+      "name": "AI Classify & Map",
+      "type": "@n8n/n8n-nodes-langchain.informationExtractor",
+      "typeVersion": 1.1,
+      "position": [
+        440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "gpt-4o-mini"
+        },
+        "options": {
+          "temperature": 0
+        }
+      },
+      "id": "openai-chat-model",
+      "name": "OpenAI Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        440,
+        520
+      ],
+      "notes": "Swap for Anthropic/Azure/etc. as needed."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.output.confidence }}",
+              "rightValue": 0.8,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "confidence-gate",
+      "name": "Confidence Gate",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        700,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "#it-identity-review"
+        },
+        "text": "=:warning: Low-confidence HRIS event needs review\n```{{ JSON.stringify($json.output, null, 2) }}```",
+        "otherOptions": {}
+      },
+      "id": "slack---human-review",
+      "name": "Slack - Human Review",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        960,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.output.event_type }}",
+                    "rightValue": "new_hire",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "New Hire"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.output.event_type }}",
+                    "rightValue": "transfer",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Transfer"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.output.event_type }}",
+                    "rightValue": "termination",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Termination"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "route-event",
+      "name": "Route Event",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        960,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "user",
+        "operation": "create",
+        "accountEnabled": true,
+        "displayName": "={{ $json.output.first_name }} {{ $json.output.last_name }}",
+        "mailNickname": "={{ ($json.output.first_name + '.' + $json.output.last_name).toLowerCase() }}",
+        "userPrincipalName": "={{ ($json.output.first_name + '.' + $json.output.last_name).toLowerCase() }}@yourcompany.com",
+        "password": "={{ Math.random().toString(36).slice(2) + 'Aa1!' }}",
+        "additionalFields": {
+          "department": "={{ $json.output.department }}",
+          "jobTitle": "={{ $json.output.job_title }}",
+          "employeeId": "={{ $json.output.employee_id }}"
+        }
+      },
+      "id": "entra---create-user",
+      "name": "Entra - Create User",
+      "type": "n8n-nodes-base.microsoftEntra",
+      "typeVersion": 1,
+      "position": [
+        1240,
+        0
+      ],
+      "notes": "Verify field names in UI. Prefer Temporary Access Pass over random password."
+    },
+    {
+      "parameters": {
+        "resource": "user",
+        "operation": "create",
+        "domain": "yourcompany.com",
+        "username": "={{ $('Route Event').item.json.output.first_name.toLowerCase() }}.{{ $('Route Event').item.json.output.last_name.toLowerCase() }}",
+        "firstName": "={{ $('Route Event').item.json.output.first_name }}",
+        "lastName": "={{ $('Route Event').item.json.output.last_name }}",
+        "password": "={{ Math.random().toString(36).slice(2) + 'Aa1!' }}",
+        "additionalFields": {}
+      },
+      "id": "google-workspace---create-user",
+      "name": "Google Workspace - Create User",
+      "type": "n8n-nodes-base.gSuiteAdmin",
+      "typeVersion": 1,
+      "position": [
+        1500,
+        0
+      ],
+      "notes": "Disable if you are Microsoft-only."
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "#it-onboarding"
+        },
+        "text": "=:wave: Provisioned {{ $('Route Event').item.json.output.first_name }} {{ $('Route Event').item.json.output.last_name }} ({{ $('Route Event').item.json.output.department }}), start {{ $('Route Event').item.json.output.effective_date }}",
+        "otherOptions": {}
+      },
+      "id": "slack---welcome-&-notify-it",
+      "name": "Slack - Welcome & Notify IT",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        1760,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "user",
+        "operation": "update",
+        "user": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $json.output.work_email }}"
+        },
+        "updateFields": {
+          "department": "={{ $json.output.department }}",
+          "jobTitle": "={{ $json.output.job_title }}"
+        }
+      },
+      "id": "entra---update-access",
+      "name": "Entra - Update Access",
+      "type": "n8n-nodes-base.microsoftEntra",
+      "typeVersion": 1,
+      "position": [
+        1240,
+        200
+      ],
+      "notes": "Add group membership changes (remove old dept groups, add new) via Entra group nodes or a role-mapping lookup."
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "#it-access-changes"
+        },
+        "text": "=:arrows_counterclockwise: Access updated for {{ $('Route Event').item.json.output.work_email }} -> {{ $('Route Event').item.json.output.department }}",
+        "otherOptions": {}
+      },
+      "id": "slack---transfer-notice",
+      "name": "Slack - Transfer Notice",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        1500,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "user",
+        "operation": "update",
+        "user": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $json.output.work_email }}"
+        },
+        "updateFields": {
+          "accountEnabled": false
+        }
+      },
+      "id": "entra---disable-account",
+      "name": "Entra - Disable Account",
+      "type": "n8n-nodes-base.microsoftEntra",
+      "typeVersion": 1,
+      "position": [
+        1240,
+        420
+      ],
+      "notes": "Also revoke sign-in sessions (Graph: /users/{id}/revokeSignInSessions) via HTTP Request."
+    },
+    {
+      "parameters": {
+        "resource": "user",
+        "operation": "update",
+        "userId": "={{ $('Route Event').item.json.output.work_email }}",
+        "updateFields": {
+          "suspended": true
+        }
+      },
+      "id": "google-workspace---suspend-user",
+      "name": "Google Workspace - Suspend User",
+      "type": "n8n-nodes-base.gSuiteAdmin",
+      "typeVersion": 1,
+      "position": [
+        1500,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "#it-offboarding"
+        },
+        "text": "=:no_entry: Deprovisioned {{ $('Route Event').item.json.output.work_email }} (effective {{ $('Route Event').item.json.output.effective_date }})",
+        "otherOptions": {}
+      },
+      "id": "slack---offboarding-log",
+      "name": "Slack - Offboarding Log",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        1760,
+        420
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "error-trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "#it-identity-alerts"
+        },
+        "text": "=:rotating_light: Lifecycle workflow failed at {{ $json.execution.lastNodeExecuted }}: {{ $json.execution.error.message }}",
+        "otherOptions": {}
+      },
+      "id": "slack---error-alert",
+      "name": "Slack - Error Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        260,
+        700
+      ]
+    }
+  ],
+  "connections": {
+    "HRIS Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Payload": {
+      "main": [
+        [
+          {
+            "node": "AI Classify & Map",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Classify & Map": {
+      "main": [
+        [
+          {
+            "node": "Confidence Gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Entra - Create User": {
+      "main": [
+        [
+          {
+            "node": "Google Workspace - Create User",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Workspace - Create User": {
+      "main": [
+        [
+          {
+            "node": "Slack - Welcome & Notify IT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Entra - Update Access": {
+      "main": [
+        [
+          {
+            "node": "Slack - Transfer Notice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Entra - Disable Account": {
+      "main": [
+        [
+          {
+            "node": "Google Workspace - Suspend User",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Workspace - Suspend User": {
+      "main": [
+        [
+          {
+            "node": "Slack - Offboarding Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Slack - Error Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Classify & Map",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Confidence Gate": {
+      "main": [
+        [
+          {
+            "node": "Route Event",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slack - Human Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Event": {
+      "main": [
+        [
+          {
+            "node": "Entra - Create User",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Entra - Update Access",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Entra - Disable Account",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

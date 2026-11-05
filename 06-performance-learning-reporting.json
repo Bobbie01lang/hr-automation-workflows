@@ -1,0 +1,1510 @@
+{
+  "name": "Performance, Learning & HR Reporting",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 1 1,4,7,10 *"
+            }
+          ]
+        }
+      },
+      "id": "review-cycle-schedule",
+      "name": "Review Cycle Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "notes": "Runs 9:00 AM on the 1st of Jan, Apr, Jul and Oct (quarterly). Change the cron for semi-annual or annual cycles."
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://YOUR-HRIS.example.com/api/employees",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "status",
+              "value": "active"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_TOKEN"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "get-active-employees",
+      "name": "Get Active Employees",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        240,
+        0
+      ],
+      "notes": "Expected fields: employee_id, full_name, email, manager_email, status. If the API wraps the array in an object, add a Split Out node."
+    },
+    {
+      "parameters": {
+        "jsCode": "const emps = $input.all().map(i => i.json);\nconst now = new Date();\nlet q = Math.floor(now.getMonth() / 3), year = now.getFullYear();\nif (q === 0) { q = 4; year -= 1; }                 // review the quarter that just ended\nconst cycle = `${year}-Q${q}`;\nconst due = new Date(now); due.setDate(due.getDate() + 14);\nconst dueStr = `${due.getFullYear()}-${String(due.getMonth() + 1).padStart(2, '0')}-${String(due.getDate()).padStart(2, '0')}`;\nreturn emps.filter(e => e.status !== 'inactive').map(e => ({ json: {\n  employee_id: e.employee_id, full_name: e.full_name, email: e.email, manager_email: e.manager_email,\n  cycle, due_date: dueStr,\n  self_review_url: `https://YOUR-N8N-URL/form/self-review?employee_id=${encodeURIComponent(e.employee_id)}&cycle=${cycle}`\n} }));"
+      },
+      "id": "build-review-requests",
+      "name": "Build Review Requests",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $json.email }}",
+        "subject": "=Self-review for {{ $json.cycle }} (due {{ $json.due_date }})",
+        "message": "=Hi {{ $json.full_name }},\n\nIt's time for your {{ $json.cycle }} self-review. It takes about 10 minutes:\n\n{{ $json.self_review_url }}\n\nPlease submit by {{ $json.due_date }}. Be specific: concrete results, what you learned, and what support you need.\n\nThank you!",
+        "options": {}
+      },
+      "id": "send-self-review-request",
+      "name": "Send Self-Review Request",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        720,
+        0
+      ],
+      "notes": "For large headcounts, add a Loop Over Items node with a short Wait to respect email rate limits."
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "#hr-performance"
+        },
+        "text": "=:chart_with_upwards_trend: Review cycle {{ $('Build Review Requests').first().json.cycle }} launched for {{ $('Build Review Requests').all().length }} employees. Due {{ $('Build Review Requests').first().json.due_date }}.",
+        "otherOptions": {}
+      },
+      "id": "slack---cycle-launched",
+      "name": "Slack - Cycle Launched",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        960,
+        0
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "path": "self-review",
+        "formTitle": "Self-Review",
+        "formDescription": "Reflect on your results this cycle. Be specific.",
+        "formFields": {
+          "values": [
+            {
+              "fieldType": "hiddenField",
+              "fieldName": "employee_id",
+              "fieldLabel": "employee_id"
+            },
+            {
+              "fieldType": "hiddenField",
+              "fieldName": "cycle",
+              "fieldLabel": "cycle"
+            },
+            {
+              "fieldLabel": "Key achievements",
+              "fieldType": "textarea",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Progress against goals",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Exceeded"
+                  },
+                  {
+                    "option": "Met"
+                  },
+                  {
+                    "option": "Partially met"
+                  },
+                  {
+                    "option": "Not met"
+                  }
+                ]
+              },
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Challenges you faced",
+              "fieldType": "textarea",
+              "requiredField": false
+            },
+            {
+              "fieldLabel": "Skills you want to develop",
+              "fieldType": "textarea",
+              "requiredField": false
+            },
+            {
+              "fieldLabel": "Support you need from your manager",
+              "fieldType": "textarea",
+              "requiredField": false
+            },
+            {
+              "fieldLabel": "Overall engagement (1-5)",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "1"
+                  },
+                  {
+                    "option": "2"
+                  },
+                  {
+                    "option": "3"
+                  },
+                  {
+                    "option": "4"
+                  },
+                  {
+                    "option": "5"
+                  }
+                ]
+              },
+              "requiredField": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "self-review-form",
+      "name": "Self-Review Form",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        500
+      ],
+      "notes": "Hidden fields are pre-filled from the link's query string (employee_id, cycle). Verify they work in your n8n version.",
+      "webhookId": "3180634f-9c11-4192-85b9-168667acf3ca"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://YOUR-HRIS.example.com/api/employees/{{ $json.employee_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_TOKEN"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "get-employee---self",
+      "name": "Get Employee - Self",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        240,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "text": "={{ JSON.stringify($('Self-Review Form').first().json) }}",
+        "attributes": {
+          "attributes": [
+            {
+              "name": "summary",
+              "type": "string",
+              "description": "3 sentence neutral summary of the self-review",
+              "required": true
+            },
+            {
+              "name": "strengths",
+              "type": "string",
+              "description": "Comma-separated strengths the employee evidences",
+              "required": true
+            },
+            {
+              "name": "growth_areas",
+              "type": "string",
+              "description": "Comma-separated development areas mentioned by the employee",
+              "required": true
+            },
+            {
+              "name": "support_needed",
+              "type": "string",
+              "description": "Support requested from the manager, empty if none",
+              "required": false
+            },
+            {
+              "name": "wellbeing_flag",
+              "type": "boolean",
+              "description": "True ONLY if the employee explicitly mentions burnout, overwork, distress or intent to leave. Do not infer or diagnose",
+              "required": true
+            },
+            {
+              "name": "flag_reason",
+              "type": "string",
+              "description": "Neutral one-sentence quote-free description of what was stated, empty if no flag",
+              "required": false
+            }
+          ]
+        },
+        "options": {
+          "systemPromptTemplate": "You summarize employee self-reviews for managers. Be neutral and factual. Never rate or rank performance, never speculate about personal circumstances, and do not add information that is not in the text."
+        }
+      },
+      "id": "ai-summarize-self-review",
+      "name": "AI Summarize Self-Review",
+      "type": "@n8n/n8n-nodes-langchain.informationExtractor",
+      "typeVersion": 1.1,
+      "position": [
+        480,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "gpt-4o-mini"
+        },
+        "options": {
+          "temperature": 0
+        }
+      },
+      "id": "self-review-model",
+      "name": "Self-Review Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        480,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "SelfReviews"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Date": "={{ $now.toISODate() }}",
+            "Cycle": "={{ $('Self-Review Form').first().json.cycle }}",
+            "Employee ID": "={{ $('Self-Review Form').first().json.employee_id }}",
+            "Name": "={{ $('Get Employee - Self').first().json.full_name }}",
+            "Goals Progress": "={{ $('Self-Review Form').first().json['Progress against goals'] }}",
+            "Engagement": "={{ $('Self-Review Form').first().json['Overall engagement (1-5)'] }}",
+            "Strengths": "={{ $('AI Summarize Self-Review').first().json.output.strengths }}",
+            "Growth Areas": "={{ $('AI Summarize Self-Review').first().json.output.growth_areas }}",
+            "Summary": "={{ $('AI Summarize Self-Review').first().json.output.summary }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "log-self-review",
+      "name": "Log Self-Review",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        720,
+        500
+      ],
+      "notes": "Restrict this sheet to HR. Contains performance data."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "c1",
+              "name": "catalog",
+              "value": "PASTE COURSE CATALOG HERE (course name | topic | duration), or replace this node with an LMS / Google Sheets lookup",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "learning-catalog",
+      "name": "Learning Catalog",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        960,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Recommend up to 3 courses for an employee, using ONLY courses in the catalog below. Match them to the growth areas and skills the employee wants to develop. If nothing fits, say so. Output one bullet per course: course name, then a one-line reason.\n\nGrowth areas: {{ $('AI Summarize Self-Review').first().json.output.growth_areas }}\nSkills wanted: {{ $('Self-Review Form').first().json['Skills you want to develop'] }}\n\nCATALOG:\n{{ $('Learning Catalog').first().json.catalog }}"
+      },
+      "id": "ai-recommend-learning",
+      "name": "AI Recommend Learning",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.5,
+      "position": [
+        1200,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "gpt-4o-mini"
+        },
+        "options": {
+          "temperature": 0.2
+        }
+      },
+      "id": "learning-model",
+      "name": "Learning Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        1200,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $('Get Employee - Self').first().json.manager_email }}",
+        "subject": "=Self-review submitted: {{ $('Get Employee - Self').first().json.full_name }} ({{ $('Self-Review Form').first().json.cycle }})",
+        "message": "=Hi,\n\n{{ $('Get Employee - Self').first().json.full_name }} submitted their {{ $('Self-Review Form').first().json.cycle }} self-review.\n\nSummary: {{ $('AI Summarize Self-Review').first().json.output.summary }}\nStrengths: {{ $('AI Summarize Self-Review').first().json.output.strengths }}\nGrowth areas: {{ $('AI Summarize Self-Review').first().json.output.growth_areas }}\nSupport requested: {{ $('AI Summarize Self-Review').first().json.output.support_needed }}\n\nSuggested learning (AI draft, please review):\n{{ $json.text }}\n\nPlease complete your manager review here:\nhttps://YOUR-N8N-URL/form/manager-review?employee_id={{ encodeURIComponent($('Self-Review Form').first().json.employee_id) }}&cycle={{ $('Self-Review Form').first().json.cycle }}",
+        "options": {}
+      },
+      "id": "email-manager---self-review-summary",
+      "name": "Email Manager - Self-Review Summary",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1440,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $('AI Summarize Self-Review').first().json.output.wellbeing_flag }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "wellbeing-flag",
+      "name": "Wellbeing Flag?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        960,
+        900
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "#hr-confidential"
+        },
+        "text": "=:speech_balloon: A self-review from {{ $('Get Employee - Self').first().json.full_name }} mentions workload, wellbeing or leaving. Neutral note: {{ $('AI Summarize Self-Review').first().json.output.flag_reason }}\nSuggested: a private, supportive check-in by HR or the manager. This is an automated flag, not a conclusion.",
+        "otherOptions": {}
+      },
+      "id": "slack---supportive-check-in",
+      "name": "Slack - Supportive Check-in",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        1200,
+        900
+      ]
+    },
+    {
+      "parameters": {
+        "path": "manager-review",
+        "formTitle": "Manager Review",
+        "formDescription": "Base your review on specific, observable results and behaviors.",
+        "formFields": {
+          "values": [
+            {
+              "fieldType": "hiddenField",
+              "fieldName": "employee_id",
+              "fieldLabel": "employee_id"
+            },
+            {
+              "fieldType": "hiddenField",
+              "fieldName": "cycle",
+              "fieldLabel": "cycle"
+            },
+            {
+              "fieldLabel": "Overall rating (1-5)",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "1"
+                  },
+                  {
+                    "option": "2"
+                  },
+                  {
+                    "option": "3"
+                  },
+                  {
+                    "option": "4"
+                  },
+                  {
+                    "option": "5"
+                  }
+                ]
+              },
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Key strengths (with examples)",
+              "fieldType": "textarea",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Areas to improve (with examples)",
+              "fieldType": "textarea",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Evidence and results this cycle",
+              "fieldType": "textarea",
+              "requiredField": false
+            },
+            {
+              "fieldLabel": "Recommendation",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "None"
+                  },
+                  {
+                    "option": "Promotion review"
+                  },
+                  {
+                    "option": "Compensation review"
+                  },
+                  {
+                    "option": "Development plan"
+                  }
+                ]
+              },
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Anything HR should know",
+              "fieldType": "textarea",
+              "requiredField": false
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "manager-review-form",
+      "name": "Manager Review Form",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        1150
+      ],
+      "webhookId": "4318ef36-65a9-46f7-a60d-aab2c57e03f1"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://YOUR-HRIS.example.com/api/employees/{{ $json.employee_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_TOKEN"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "get-employee---manager",
+      "name": "Get Employee - Manager",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        240,
+        1150
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You help a manager write a clear, fair performance review. Use ONLY the manager's input below. Do not change the rating, do not add facts, and do not recommend pay or promotion outcomes.\n\nEmployee role: {{ $('Get Employee - Manager').first().json.job_title }}\nManager input: {{ JSON.stringify($('Manager Review Form').first().json) }}\n\nOutput two sections:\n1) DRAFT REVIEW: a balanced narrative in 150-200 words.\n2) CONSISTENCY & BIAS NOTES: bullet any vague or unsupported statements, personality-based or subjective wording, language that references age, gender, family status, nationality, religion or other protected characteristics, and possible recency bias. If none, write 'No issues noticed'."
+      },
+      "id": "ai-draft-review-and-bias-check",
+      "name": "AI Draft Review & Bias Check",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.5,
+      "position": [
+        480,
+        1150
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "gpt-4o-mini"
+        },
+        "options": {
+          "temperature": 0.2
+        }
+      },
+      "id": "manager-draft-model",
+      "name": "Manager Draft Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        480,
+        1370
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "ManagerReviews"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Date": "={{ $now.toISODate() }}",
+            "Cycle": "={{ $('Manager Review Form').first().json.cycle }}",
+            "Employee ID": "={{ $('Manager Review Form').first().json.employee_id }}",
+            "Name": "={{ $('Get Employee - Manager').first().json.full_name }}",
+            "Rating": "={{ $('Manager Review Form').first().json['Overall rating (1-5)'] }}",
+            "Recommendation": "={{ $('Manager Review Form').first().json.Recommendation }}",
+            "Status": "Pending calibration"
+          }
+        },
+        "options": {}
+      },
+      "id": "log-manager-review",
+      "name": "Log Manager Review",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        720,
+        1150
+      ],
+      "notes": "Highly sensitive (ratings). Restrict to HR leadership."
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $('Get Employee - Manager').first().json.manager_email }}",
+        "subject": "=Draft review for {{ $('Get Employee - Manager').first().json.full_name }} ({{ $('Manager Review Form').first().json.cycle }})",
+        "message": "=Your review input was saved. Below is an AI-assisted draft and a consistency check. Please edit before sharing with the employee. Final ratings are decided in calibration.\n\n{{ $('AI Draft Review & Bias Check').first().json.text }}",
+        "options": {}
+      },
+      "id": "email-manager---draft-and-notes",
+      "name": "Email Manager - Draft & Notes",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        960,
+        1150
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "#hr-performance"
+        },
+        "text": "=:memo: Manager review submitted for {{ $('Get Employee - Manager').first().json.full_name }} ({{ $('Manager Review Form').first().json.cycle }}). Pending calibration.",
+        "otherOptions": {}
+      },
+      "id": "slack---hr-calibration-queue",
+      "name": "Slack - HR Calibration Queue",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        1200,
+        1150
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * 1"
+            }
+          ]
+        }
+      },
+      "id": "weekly-learning-check",
+      "name": "Weekly Learning Check",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        1750
+      ],
+      "notes": "Mondays at 9:00 AM."
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://YOUR-LMS.example.com/api/assignments",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "mandatory",
+              "value": "true"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_TOKEN"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "get-training-assignments",
+      "name": "Get Training Assignments",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        240,
+        1750
+      ],
+      "notes": "Expected fields: employee_id, full_name, email, manager_email, course, due_date (YYYY-MM-DD), status."
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all().map(i => i.json);\nconst today = new Date(); today.setHours(0, 0, 0, 0);\nconst out = [];\nfor (const t of items) {\n  if (['completed', 'waived'].includes(t.status)) continue;\n  const due = new Date(t.due_date + 'T00:00:00');\n  const diff = Math.round((due - today) / 86400000);\n  if (diff < 0) out.push({ json: { ...t, state: 'overdue', days_overdue: -diff, escalate: -diff >= 7 } });\n  else if (diff <= 7) out.push({ json: { ...t, state: 'due_soon', days_to_due: diff, escalate: false } });\n}\nreturn out;"
+      },
+      "id": "find-overdue-and-due-soon",
+      "name": "Find Overdue & Due Soon",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        1750
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $json.email }}",
+        "subject": "={{ $json.state === 'overdue' ? 'Overdue training: ' : 'Training due soon: ' }}{{ $json.course }}",
+        "message": "=Hi {{ $json.full_name }},\n\n{{ $json.state === 'overdue' ? 'Your mandatory training \"' + $json.course + '\" is ' + $json.days_overdue + ' day(s) overdue.' : 'Your mandatory training \"' + $json.course + '\" is due in ' + $json.days_to_due + ' day(s).' }}\n\nPlease complete it as soon as possible. Reply to HR if you need help or an extension.",
+        "options": {}
+      },
+      "id": "send-training-reminder",
+      "name": "Send Training Reminder",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        720,
+        1750
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $('Find Overdue & Due Soon').item.json.escalate }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "needs-escalation",
+      "name": "Needs Escalation?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        960,
+        1750
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $('Find Overdue & Due Soon').item.json.manager_email }}",
+        "subject": "=Escalation: overdue training for {{ $('Find Overdue & Due Soon').item.json.full_name }}",
+        "message": "=Hi,\n\n{{ $('Find Overdue & Due Soon').item.json.full_name }} has not completed mandatory training \"{{ $('Find Overdue & Due Soon').item.json.course }}\" ({{ $('Find Overdue & Due Soon').item.json.days_overdue }} days overdue). Please follow up and help them make time to complete it.",
+        "options": {}
+      },
+      "id": "email-manager---overdue-training",
+      "name": "Email Manager - Overdue Training",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1200,
+        1650
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "#hr-learning"
+        },
+        "text": "=:books: Weekly mandatory training: {{ $('Find Overdue & Due Soon').all().filter(i => i.json.state === 'overdue').length }} overdue, {{ $('Find Overdue & Due Soon').all().filter(i => i.json.state === 'due_soon').length }} due within 7 days.",
+        "otherOptions": {}
+      },
+      "id": "slack---learning-summary",
+      "name": "Slack - Learning Summary",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        720,
+        1950
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * 1"
+            }
+          ]
+        }
+      },
+      "id": "weekly-hr-report-schedule",
+      "name": "Weekly HR Report Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        2300
+      ],
+      "notes": "Mondays at 8:00 AM."
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://YOUR-HRIS.example.com/api/metrics/headcount",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_TOKEN"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "get-headcount-and-movement",
+      "name": "Get Headcount & Movement",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        240,
+        2300
+      ],
+      "notes": "Expected: headcount, headcount_start (30 days ago), joiners_30d, leavers_30d, open_positions."
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://YOUR-TIMEKEEPING.example.com/api/metrics/attendance",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_TOKEN"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "get-attendance-summary",
+      "name": "Get Attendance Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        2300
+      ],
+      "notes": "Expected: absence_rate_pct, overtime_hours, late_incidents (last 30 days).",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://YOUR-HRIS.example.com/api/metrics/performance-learning",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_TOKEN"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "get-review-and-training-status",
+      "name": "Get Review & Training Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        720,
+        2300
+      ],
+      "notes": "Expected: reviews_completed, reviews_total, training_completed, training_total, overdue_training.",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const h = $('Get Headcount & Movement').first().json;\nconst a = $('Get Attendance Summary').first().json;\nconst r = $('Get Review & Training Status').first().json;\nconst pct = (n, d) => d > 0 ? Math.round(n / d * 1000) / 10 : null;\nconst avgHc = h.headcount_start != null ? (h.headcount_start + h.headcount) / 2 : h.headcount;\n\nconst kpis = {\n  headcount: h.headcount, joiners_30d: h.joiners_30d, leavers_30d: h.leavers_30d,\n  open_positions: h.open_positions,\n  turnover_30d_pct: pct(h.leavers_30d, avgHc),\n  absence_rate_pct: a.absence_rate_pct, overtime_hours: a.overtime_hours, late_incidents: a.late_incidents,\n  review_completion_pct: pct(r.reviews_completed, r.reviews_total),\n  training_compliance_pct: pct(r.training_completed, r.training_total),\n  overdue_training: r.overdue_training\n};\n\n// Thresholds: adjust to your targets\nconst alerts = [];\nif (kpis.turnover_30d_pct != null && kpis.turnover_30d_pct > 3) alerts.push(`30-day turnover ${kpis.turnover_30d_pct}% is above 3%`);\nif (kpis.absence_rate_pct != null && kpis.absence_rate_pct > 5) alerts.push(`Absence rate ${kpis.absence_rate_pct}% is above 5%`);\nif (kpis.training_compliance_pct != null && kpis.training_compliance_pct < 90) alerts.push(`Training compliance ${kpis.training_compliance_pct}% is below 90%`);\nif (kpis.review_completion_pct != null && kpis.review_completion_pct < 80) alerts.push(`Review completion ${kpis.review_completion_pct}% is below 80%`);\n\nreturn [{ json: { generated_at: new Date().toISOString(), kpis, alerts } }];"
+      },
+      "id": "calculate-kpis",
+      "name": "Calculate KPIs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        2300
+      ],
+      "notes": "All numbers are computed here in code. The AI only writes the narrative."
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Write a weekly HR report for leadership in under 150 words: a one-line headline, up to 5 bullets of key numbers and trends, then 1-2 suggested actions focused on any alerts. Use ONLY the numbers below, never invent figures, and do not state causes you cannot know (say 'worth investigating' instead). No emojis.\n\nKPIs: {{ JSON.stringify($('Calculate KPIs').first().json.kpis) }}\nAlerts: {{ JSON.stringify($('Calculate KPIs').first().json.alerts) }}"
+      },
+      "id": "ai-executive-summary",
+      "name": "AI Executive Summary",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.5,
+      "position": [
+        1200,
+        2300
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "gpt-4o-mini"
+        },
+        "options": {
+          "temperature": 0.2
+        }
+      },
+      "id": "report-model",
+      "name": "Report Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        1200,
+        2520
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "KPI History"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Date": "={{ $now.toISODate() }}",
+            "Headcount": "={{ $('Calculate KPIs').first().json.kpis.headcount }}",
+            "Joiners 30d": "={{ $('Calculate KPIs').first().json.kpis.joiners_30d }}",
+            "Leavers 30d": "={{ $('Calculate KPIs').first().json.kpis.leavers_30d }}",
+            "Turnover 30d %": "={{ $('Calculate KPIs').first().json.kpis.turnover_30d_pct }}",
+            "Absence %": "={{ $('Calculate KPIs').first().json.kpis.absence_rate_pct }}",
+            "Overtime Hours": "={{ $('Calculate KPIs').first().json.kpis.overtime_hours }}",
+            "Review Completion %": "={{ $('Calculate KPIs').first().json.kpis.review_completion_pct }}",
+            "Training Compliance %": "={{ $('Calculate KPIs').first().json.kpis.training_compliance_pct }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "log-kpi-snapshot",
+      "name": "Log KPI Snapshot",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1440,
+        2300
+      ],
+      "notes": "Builds a weekly history you can chart in Sheets or Looker Studio."
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "#hr-leadership"
+        },
+        "text": "=:bar_chart: *Weekly HR report*\n{{ $('AI Executive Summary').first().json.text }}\n\nAlerts: {{ $('Calculate KPIs').first().json.alerts.length ? $('Calculate KPIs').first().json.alerts.join('; ') : 'none' }}",
+        "otherOptions": {}
+      },
+      "id": "slack---weekly-hr-report",
+      "name": "Slack - Weekly HR Report",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        1680,
+        2300
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "hr-leadership@yourcompany.com",
+        "subject": "=Weekly HR report ({{ $now.toISODate() }})",
+        "message": "={{ $('AI Executive Summary').first().json.text }}\n\nAlerts: {{ $('Calculate KPIs').first().json.alerts.length ? $('Calculate KPIs').first().json.alerts.join('; ') : 'none' }}\n\nFull history: https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID",
+        "options": {}
+      },
+      "id": "email-hr-leadership",
+      "name": "Email HR Leadership",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1920,
+        2300
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "error-trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        2900
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "#hr-alerts"
+        },
+        "text": "=:rotating_light: Performance/Learning/Reporting workflow failed at {{ $json.execution.lastNodeExecuted }}: {{ $json.execution.error.message }}",
+        "otherOptions": {}
+      },
+      "id": "slack---error-alert",
+      "name": "Slack - Error Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        260,
+        2900
+      ]
+    }
+  ],
+  "connections": {
+    "Review Cycle Schedule": {
+      "main": [
+        [
+          {
+            "node": "Get Active Employees",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Active Employees": {
+      "main": [
+        [
+          {
+            "node": "Build Review Requests",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Review Requests": {
+      "main": [
+        [
+          {
+            "node": "Send Self-Review Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Self-Review Request": {
+      "main": [
+        [
+          {
+            "node": "Slack - Cycle Launched",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Self-Review Form": {
+      "main": [
+        [
+          {
+            "node": "Get Employee - Self",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Employee - Self": {
+      "main": [
+        [
+          {
+            "node": "AI Summarize Self-Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Summarize Self-Review": {
+      "main": [
+        [
+          {
+            "node": "Log Self-Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Self-Review": {
+      "main": [
+        [
+          {
+            "node": "Learning Catalog",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Wellbeing Flag?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Learning Catalog": {
+      "main": [
+        [
+          {
+            "node": "AI Recommend Learning",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Recommend Learning": {
+      "main": [
+        [
+          {
+            "node": "Email Manager - Self-Review Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wellbeing Flag?": {
+      "main": [
+        [
+          {
+            "node": "Slack - Supportive Check-in",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Self-Review Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Summarize Self-Review",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Learning Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Recommend Learning",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manager Review Form": {
+      "main": [
+        [
+          {
+            "node": "Get Employee - Manager",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Employee - Manager": {
+      "main": [
+        [
+          {
+            "node": "AI Draft Review & Bias Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Draft Review & Bias Check": {
+      "main": [
+        [
+          {
+            "node": "Log Manager Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Manager Review": {
+      "main": [
+        [
+          {
+            "node": "Email Manager - Draft & Notes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email Manager - Draft & Notes": {
+      "main": [
+        [
+          {
+            "node": "Slack - HR Calibration Queue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manager Draft Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Draft Review & Bias Check",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Weekly Learning Check": {
+      "main": [
+        [
+          {
+            "node": "Get Training Assignments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Training Assignments": {
+      "main": [
+        [
+          {
+            "node": "Find Overdue & Due Soon",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Overdue & Due Soon": {
+      "main": [
+        [
+          {
+            "node": "Send Training Reminder",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Slack - Learning Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Training Reminder": {
+      "main": [
+        [
+          {
+            "node": "Needs Escalation?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Escalation?": {
+      "main": [
+        [
+          {
+            "node": "Email Manager - Overdue Training",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Weekly HR Report Schedule": {
+      "main": [
+        [
+          {
+            "node": "Get Headcount & Movement",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Headcount & Movement": {
+      "main": [
+        [
+          {
+            "node": "Get Attendance Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Attendance Summary": {
+      "main": [
+        [
+          {
+            "node": "Get Review & Training Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Review & Training Status": {
+      "main": [
+        [
+          {
+            "node": "Calculate KPIs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate KPIs": {
+      "main": [
+        [
+          {
+            "node": "AI Executive Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Executive Summary": {
+      "main": [
+        [
+          {
+            "node": "Log KPI Snapshot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log KPI Snapshot": {
+      "main": [
+        [
+          {
+            "node": "Slack - Weekly HR Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack - Weekly HR Report": {
+      "main": [
+        [
+          {
+            "node": "Email HR Leadership",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Report Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Executive Summary",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Slack - Error Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Manila"
+  },
+  "pinData": {}
+}

@@ -1,0 +1,1030 @@
+{
+  "name": "Offboarding (Resignation to Clearance)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "hris-offboarding",
+        "authentication": "headerAuth",
+        "options": {}
+      },
+      "id": "offboarding-webhook",
+      "name": "Offboarding Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "notes": "Call from HRIS when a resignation is accepted or a termination is approved. Body: { employee_id, separation_type: resignation|termination|end_of_contract|retirement, last_working_day: YYYY-MM-DD, immediate_access_revoke?: boolean }.",
+      "webhookId": "f21e5d38-9c3c-4a02-8c88-8d90174764e6"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://YOUR-HRIS.example.com/api/employees/{{ $json.body.employee_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_TOKEN"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "get-employee-details",
+      "name": "Get Employee Details",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        240,
+        300
+      ],
+      "notes": "Expected fields: employee_id, full_name, email, department, job_title, manager_email, leave_balance."
+    },
+    {
+      "parameters": {
+        "jsCode": "const b = $('Offboarding Webhook').first().json.body;\nconst emp = $('Get Employee Details').first().json;\n\nconst [Y, M, D] = b.last_working_day.split('-').map(Number);\nconst lwd = new Date(Y, M - 1, D);\nconst addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };\nconst fmt = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;\n\nconst type = b.separation_type;\nconst involuntary = type === 'termination';\nconst immediate = b.immediate_access_revoke ?? involuntary;\nconst revokeAt = new Date(Y, M - 1, D, 18, 0, 0);          // 6:00 PM on last working day\nconst FINAL_PAY_DAYS = 30;                                  // default; confirm with company policy / counsel\n\nconst tasks = {\n  HR: [\n    'Confirm resignation/termination documents are complete',\n    involuntary ? 'Confirm termination process and documentation reviewed by HR/legal' : 'Schedule exit interview',\n    'Prepare clearance form',\n    'Compute final pay (unused leave, pro-rated benefits, deductions, tax)',\n    'Prepare Certificate of Employment (on request)'\n  ],\n  IT: [\n    `Disable accounts ${immediate ? 'immediately' : 'at 6:00 PM on ' + b.last_working_day}`,\n    'Collect laptop, phone and other devices',\n    'Transfer mailbox, files and shared drive ownership to manager',\n    'Remove licences and group memberships'\n  ],\n  Manager: [\n    'Complete handover plan and knowledge transfer',\n    'Reassign open tasks, clients and projects',\n    'Transfer shared documents and credentials ownership',\n    'Announce departure to the team (with HR approval of wording)'\n  ],\n  Finance: [\n    'Settle cash advances, loans and pending reimbursements',\n    'Cancel company card / expense access'\n  ],\n  Facilities: [\n    'Collect ID, badge and keys',\n    'Remove building and parking access'\n  ]\n};\nconst checklist_text = Object.entries(tasks).map(([team, items]) => `*${team}*\\n` + items.map(t => '\u2022 ' + t).join('\\n')).join('\\n\\n');\n\nreturn [{ json: {\n  employee_id: emp.employee_id, full_name: emp.full_name, email: emp.email,\n  department: emp.department, job_title: emp.job_title, manager_email: emp.manager_email,\n  leave_balance: emp.leave_balance ?? null,\n  separation_type: type, last_working_day: b.last_working_day,\n  immediate_revoke: immediate, send_exit_interview: !involuntary,\n  revoke_at: revokeAt.toISOString(),\n  exit_interview_by: fmt(addDays(lwd, -2)),\n  final_pay_due: fmt(addDays(lwd, FINAL_PAY_DAYS)),\n  tasks, checklist_text\n} }];"
+      },
+      "id": "build-offboarding-plan",
+      "name": "Build Offboarding Plan",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        300
+      ],
+      "notes": "Edit the task lists, the 6:00 PM revoke time and FINAL_PAY_DAYS to match your policy and local labor rules."
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Draft a handover / knowledge-transfer checklist (8-10 short bullets) for a departing employee.\nRole: {{ $('Build Offboarding Plan').first().json.job_title }}\nDepartment: {{ $('Build Offboarding Plan').first().json.department }}\nLast working day: {{ $('Build Offboarding Plan').first().json.last_working_day }}\nRules: this is a DRAFT for the manager to edit. Cover documentation, open tasks, key contacts, recurring duties, system access and credentials ownership, and a final review meeting. Do not invent project, client or system names. Output only the bullets."
+      },
+      "id": "ai-draft-handover-plan",
+      "name": "AI Draft Handover Plan",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.5,
+      "position": [
+        720,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "gpt-4o-mini"
+        },
+        "options": {
+          "temperature": 0.2
+        }
+      },
+      "id": "handover-model",
+      "name": "Handover Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        720,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $('Build Offboarding Plan').first().json.manager_email }}",
+        "subject": "=Offboarding: {{ $('Build Offboarding Plan').first().json.full_name }} (last day {{ $('Build Offboarding Plan').first().json.last_working_day }})",
+        "message": "=Hi,\n\n{{ $('Build Offboarding Plan').first().json.full_name }} ({{ $('Build Offboarding Plan').first().json.job_title }}) has a last working day of {{ $('Build Offboarding Plan').first().json.last_working_day }}.\n\nPlease review and complete this draft handover plan with them:\n\n{{ $json.text }}\n\nHR, IT, Finance and Facilities have been notified of their tasks. Reply to HR if anything changes.",
+        "options": {}
+      },
+      "id": "email-manager---handover-plan",
+      "name": "Email Manager - Handover Plan",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        960,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "#offboarding"
+        },
+        "text": "=:wave: *Offboarding started: {{ $('Build Offboarding Plan').first().json.full_name }}* ({{ $('Build Offboarding Plan').first().json.department }})\nType: {{ $('Build Offboarding Plan').first().json.separation_type }} | Last day: {{ $('Build Offboarding Plan').first().json.last_working_day }} | Access revoke: {{ $('Build Offboarding Plan').first().json.immediate_revoke ? 'immediate' : 'end of last day' }}\nFinal pay target: {{ $('Build Offboarding Plan').first().json.final_pay_due }}\n\n{{ $('Build Offboarding Plan').first().json.checklist_text }}",
+        "otherOptions": {}
+      },
+      "id": "slack---offboarding-checklist",
+      "name": "Slack - Offboarding Checklist",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        1200,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Offboarding"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Employee ID": "={{ $('Build Offboarding Plan').first().json.employee_id }}",
+            "Name": "={{ $('Build Offboarding Plan').first().json.full_name }}",
+            "Department": "={{ $('Build Offboarding Plan').first().json.department }}",
+            "Type": "={{ $('Build Offboarding Plan').first().json.separation_type }}",
+            "Last Working Day": "={{ $('Build Offboarding Plan').first().json.last_working_day }}",
+            "Final Pay Due": "={{ $('Build Offboarding Plan').first().json.final_pay_due }}",
+            "Started": "={{ $now.toISO() }}",
+            "Status": "In progress"
+          }
+        },
+        "options": {}
+      },
+      "id": "log-offboarding-case",
+      "name": "Log Offboarding Case",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $('Build Offboarding Plan').first().json.send_exit_interview }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "send-exit-interview",
+      "name": "Send Exit Interview?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1680,
+        300
+      ],
+      "notes": "Skipped for involuntary separations by default."
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $('Build Offboarding Plan').first().json.email }}",
+        "subject": "Your exit interview",
+        "message": "=Hi {{ $('Build Offboarding Plan').first().json.full_name }},\n\nThank you for your contribution to the team. We'd value your honest feedback before {{ $('Build Offboarding Plan').first().json.exit_interview_by }}. It takes about 5 minutes:\n\nhttps://YOUR-N8N-URL/form/exit-interview\n\nParticipation is voluntary. Please use your work email on the form.",
+        "options": {}
+      },
+      "id": "email-exit-interview-invite",
+      "name": "Email Exit Interview Invite",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1920,
+        200
+      ],
+      "notes": "Use the Production URL of the Exit Interview Form below."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $('Build Offboarding Plan').first().json.immediate_revoke }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "immediate-revoke",
+      "name": "Immediate Revoke?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2160,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "resume": "specificTime",
+        "dateTime": "={{ $('Build Offboarding Plan').first().json.revoke_at }}"
+      },
+      "id": "wait-until-last-working-day",
+      "name": "Wait Until Last Working Day",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2400,
+        420
+      ],
+      "notes": "Holds the execution until 6:00 PM on the last working day. Continues immediately if the time has passed.",
+      "webhookId": "98aabb40-9d12-48e5-baac-aee98d48dc75"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR-N8N-URL/webhook/hris-lifecycle",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "YOUR_HEADER_AUTH_VALUE"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ source: 'offboarding', event: 'Terminate', worker_id: $('Build Offboarding Plan').first().json.employee_id, full_name: $('Build Offboarding Plan').first().json.full_name, work_email: $('Build Offboarding Plan').first().json.email, department: $('Build Offboarding Plan').first().json.department, effective_date: $('Build Offboarding Plan').first().json.last_working_day }) }}",
+        "options": {}
+      },
+      "id": "trigger-deprovisioning",
+      "name": "Trigger Deprovisioning",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2640,
+        300
+      ],
+      "notes": "Calls the first workflow (HRIS Lifecycle -> Identity Provisioning), which disables Entra ID, suspends Google Workspace and logs to Slack. Use its Production URL and header auth."
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendAndWait",
+        "sendTo": "it@yourcompany.com",
+        "subject": "=Asset return check: {{ $('Build Offboarding Plan').first().json.full_name }}",
+        "message": "=Please confirm that all company assets of {{ $('Build Offboarding Plan').first().json.full_name }} ({{ $('Build Offboarding Plan').first().json.department }}, last day {{ $('Build Offboarding Plan').first().json.last_working_day }}) were received: laptop, devices, ID/badge, keys.\n\nChoose 'All returned' or 'Outstanding items' (then follow up with HR).",
+        "responseType": "approval",
+        "approvalOptions": {
+          "values": {
+            "approvalType": "double",
+            "approveLabel": "All returned",
+            "disapproveLabel": "Outstanding items"
+          }
+        },
+        "options": {}
+      },
+      "id": "it-asset-return-confirmation",
+      "name": "IT Asset Return Confirmation",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        2880,
+        300
+      ],
+      "notes": "Pauses until IT responds. Verify parameter names in your n8n version.",
+      "webhookId": "b3d960a0-5983-4a28-9af3-e9ad7589a765"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.data.approved }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "assets-returned",
+      "name": "Assets Returned?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "payroll@yourcompany.com",
+        "subject": "=Final pay inputs: {{ $('Build Offboarding Plan').first().json.full_name }} (last day {{ $('Build Offboarding Plan').first().json.last_working_day }})",
+        "message": "=Hi Payroll,\n\nClearance is complete for {{ $('Build Offboarding Plan').first().json.full_name }} ({{ $('Build Offboarding Plan').first().json.employee_id }}).\n\nSeparation type: {{ $('Build Offboarding Plan').first().json.separation_type }}\nLast working day: {{ $('Build Offboarding Plan').first().json.last_working_day }}\nFinal pay target date: {{ $('Build Offboarding Plan').first().json.final_pay_due }}\nLeave balance on record: {{ JSON.stringify($('Build Offboarding Plan').first().json.leave_balance) }}\n\nPlease compute the final pay (unused leave conversion, pro-rated benefits, deductions, tax) per company policy and applicable law, and send to HR for review before release.",
+        "options": {}
+      },
+      "id": "send-final-pay-inputs-to-payroll",
+      "name": "Send Final Pay Inputs to Payroll",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        3360,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://YOUR-HRIS.example.com/api/employees/{{ $('Build Offboarding Plan').first().json.employee_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_TOKEN"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ status: 'separated', separation_date: $('Build Offboarding Plan').first().json.last_working_day }) }}",
+        "options": {}
+      },
+      "id": "update-hris-status",
+      "name": "Update HRIS Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3600,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "#offboarding"
+        },
+        "text": "=:white_check_mark: Offboarding complete for {{ $('Build Offboarding Plan').first().json.full_name }}. Accounts disabled, assets returned, final pay inputs sent (target {{ $('Build Offboarding Plan').first().json.final_pay_due }}).",
+        "otherOptions": {}
+      },
+      "id": "slack---offboarding-complete",
+      "name": "Slack - Offboarding Complete",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        3840,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "#offboarding"
+        },
+        "text": "=:warning: Clearance pending for {{ $('Build Offboarding Plan').first().json.full_name }}: IT reported outstanding assets. HR to follow up before final pay is released.",
+        "otherOptions": {}
+      },
+      "id": "slack---clearance-pending",
+      "name": "Slack - Clearance Pending",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        3360,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "path": "exit-interview",
+        "formTitle": "Exit Interview",
+        "formDescription": "Your honest feedback helps us improve. Participation is voluntary.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Work Email",
+              "fieldType": "email",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Main reason for leaving",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Career growth"
+                  },
+                  {
+                    "option": "Compensation"
+                  },
+                  {
+                    "option": "Manager / leadership"
+                  },
+                  {
+                    "option": "Work-life balance"
+                  },
+                  {
+                    "option": "Relocation"
+                  },
+                  {
+                    "option": "Personal / family"
+                  },
+                  {
+                    "option": "Other"
+                  }
+                ]
+              },
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "What worked well",
+              "fieldType": "textarea"
+            },
+            {
+              "fieldLabel": "What could we improve",
+              "fieldType": "textarea"
+            },
+            {
+              "fieldLabel": "Manager support rating",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "1"
+                  },
+                  {
+                    "option": "2"
+                  },
+                  {
+                    "option": "3"
+                  },
+                  {
+                    "option": "4"
+                  },
+                  {
+                    "option": "5"
+                  }
+                ]
+              },
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Would you recommend us as an employer",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Yes"
+                  },
+                  {
+                    "option": "Maybe"
+                  },
+                  {
+                    "option": "No"
+                  }
+                ]
+              },
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Anything else you would like HR to know",
+              "fieldType": "textarea"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "exit-interview-form",
+      "name": "Exit Interview Form",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        900
+      ],
+      "webhookId": "c5c49f69-b130-4ac6-be34-686b888f4e36"
+    },
+    {
+      "parameters": {
+        "text": "={{ JSON.stringify($json) }}",
+        "attributes": {
+          "attributes": [
+            {
+              "name": "summary",
+              "type": "string",
+              "description": "2-3 sentence neutral summary of the feedback",
+              "required": true
+            },
+            {
+              "name": "sentiment",
+              "type": "string",
+              "description": "positive, neutral or negative",
+              "required": true
+            },
+            {
+              "name": "themes",
+              "type": "string",
+              "description": "Comma-separated themes, e.g. compensation, management, growth",
+              "required": true
+            },
+            {
+              "name": "serious_concern",
+              "type": "boolean",
+              "description": "True if the feedback mentions harassment, discrimination, retaliation, safety, fraud or legal risk",
+              "required": true
+            },
+            {
+              "name": "concern_summary",
+              "type": "string",
+              "description": "Neutral one-sentence description of the concern, empty if none",
+              "required": false
+            }
+          ]
+        },
+        "options": {
+          "systemPromptTemplate": "You summarize exit interview feedback for HR. Be neutral and factual. Do not judge or assign blame, and do not infer facts that are not stated."
+        }
+      },
+      "id": "ai-summarize-exit-feedback",
+      "name": "AI Summarize Exit Feedback",
+      "type": "@n8n/n8n-nodes-langchain.informationExtractor",
+      "typeVersion": 1.1,
+      "position": [
+        240,
+        900
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "gpt-4o-mini"
+        },
+        "options": {
+          "temperature": 0
+        }
+      },
+      "id": "exit-feedback-model",
+      "name": "Exit Feedback Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        1120
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "ExitInterviews"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Date": "={{ $now.toISODate() }}",
+            "Reason": "={{ $('Exit Interview Form').first().json['Main reason for leaving'] }}",
+            "Manager Rating": "={{ $('Exit Interview Form').first().json['Manager support rating'] }}",
+            "Recommend": "={{ $('Exit Interview Form').first().json['Would you recommend us as an employer'] }}",
+            "Sentiment": "={{ $('AI Summarize Exit Feedback').first().json.output.sentiment }}",
+            "Themes": "={{ $('AI Summarize Exit Feedback').first().json.output.themes }}",
+            "Summary": "={{ $('AI Summarize Exit Feedback').first().json.output.summary }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "log-exit-feedback",
+      "name": "Log Exit Feedback",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        480,
+        900
+      ],
+      "notes": "Restrict access to this sheet to HR only. It intentionally omits the employee name and free text."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $('AI Summarize Exit Feedback').first().json.output.serious_concern }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "serious-concern",
+      "name": "Serious Concern?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        720,
+        900
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "#hr-confidential"
+        },
+        "text": "=:rotating_light: Exit interview raised a serious concern from {{ $('Exit Interview Form').first().json['Work Email'] }}.\nNeutral summary: {{ $('AI Summarize Exit Feedback').first().json.output.concern_summary }}\nHR to review the original submission and follow the formal reporting process.",
+        "otherOptions": {}
+      },
+      "id": "slack---hr-confidential-alert",
+      "name": "Slack - HR Confidential Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        960,
+        900
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "error-trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        1400
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "#hr-alerts"
+        },
+        "text": "=:rotating_light: Offboarding workflow failed at {{ $json.execution.lastNodeExecuted }}: {{ $json.execution.error.message }}",
+        "otherOptions": {}
+      },
+      "id": "slack---error-alert",
+      "name": "Slack - Error Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        260,
+        1400
+      ]
+    }
+  ],
+  "connections": {
+    "Offboarding Webhook": {
+      "main": [
+        [
+          {
+            "node": "Get Employee Details",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Employee Details": {
+      "main": [
+        [
+          {
+            "node": "Build Offboarding Plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Offboarding Plan": {
+      "main": [
+        [
+          {
+            "node": "AI Draft Handover Plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Draft Handover Plan": {
+      "main": [
+        [
+          {
+            "node": "Email Manager - Handover Plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email Manager - Handover Plan": {
+      "main": [
+        [
+          {
+            "node": "Slack - Offboarding Checklist",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack - Offboarding Checklist": {
+      "main": [
+        [
+          {
+            "node": "Log Offboarding Case",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Offboarding Case": {
+      "main": [
+        [
+          {
+            "node": "Send Exit Interview?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email Exit Interview Invite": {
+      "main": [
+        [
+          {
+            "node": "Immediate Revoke?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait Until Last Working Day": {
+      "main": [
+        [
+          {
+            "node": "Trigger Deprovisioning",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trigger Deprovisioning": {
+      "main": [
+        [
+          {
+            "node": "IT Asset Return Confirmation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IT Asset Return Confirmation": {
+      "main": [
+        [
+          {
+            "node": "Assets Returned?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Final Pay Inputs to Payroll": {
+      "main": [
+        [
+          {
+            "node": "Update HRIS Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update HRIS Status": {
+      "main": [
+        [
+          {
+            "node": "Slack - Offboarding Complete",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Exit Interview Form": {
+      "main": [
+        [
+          {
+            "node": "AI Summarize Exit Feedback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Summarize Exit Feedback": {
+      "main": [
+        [
+          {
+            "node": "Log Exit Feedback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Exit Feedback": {
+      "main": [
+        [
+          {
+            "node": "Serious Concern?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Slack - Error Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Handover Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Draft Handover Plan",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Exit Feedback Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Summarize Exit Feedback",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Exit Interview?": {
+      "main": [
+        [
+          {
+            "node": "Email Exit Interview Invite",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Immediate Revoke?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Immediate Revoke?": {
+      "main": [
+        [
+          {
+            "node": "Trigger Deprovisioning",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Wait Until Last Working Day",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assets Returned?": {
+      "main": [
+        [
+          {
+            "node": "Send Final Pay Inputs to Payroll",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slack - Clearance Pending",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Serious Concern?": {
+      "main": [
+        [
+          {
+            "node": "Slack - HR Confidential Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Manila"
+  },
+  "pinData": {}
+}

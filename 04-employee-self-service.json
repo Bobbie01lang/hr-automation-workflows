@@ -1,0 +1,1163 @@
+{
+  "name": "Employee Self-Service & HR Requests (AI Router)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "hr-request",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "request-webhook",
+      "name": "Request Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "notes": "Body: { \"email\": \"juan@company.com\", \"message\": \"I want to file leave Dec 22-26\" }. Connect from a Slack slash command / Teams bot / web form. Slack slash commands send form-encoded data, so map user email and text into this JSON shape first."
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "Thanks! Your request was received. You will get an email update shortly.",
+        "options": {}
+      },
+      "id": "acknowledge-request",
+      "name": "Acknowledge Request",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://YOUR-HRIS.example.com/api/employees",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "email",
+              "value": "={{ $('Request Webhook').first().json.body.email }}"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_TOKEN"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "lookup-employee",
+      "name": "Lookup Employee",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        300
+      ],
+      "notes": "Identity comes from the verified sender email, never from the message text. Expected fields: employee_id, full_name, email, department, manager_email, leave_balance (number or object by leave type).",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "text": "={{ $('Request Webhook').first().json.body.message }}",
+        "attributes": {
+          "attributes": [
+            {
+              "name": "category",
+              "type": "string",
+              "description": "One of: leave_request, hr_question, certificate_request, payslip_request, profile_update, expense_reimbursement, it_equipment, other",
+              "required": true
+            },
+            {
+              "name": "leave_type",
+              "type": "string",
+              "description": "vacation, sick, emergency, or other. Empty if not a leave request",
+              "required": false
+            },
+            {
+              "name": "start_date",
+              "type": "string",
+              "description": "Leave start date YYYY-MM-DD, assume the current year if missing",
+              "required": false
+            },
+            {
+              "name": "end_date",
+              "type": "string",
+              "description": "Leave end date YYYY-MM-DD",
+              "required": false
+            },
+            {
+              "name": "details",
+              "type": "string",
+              "description": "One-sentence summary of what the employee wants",
+              "required": true
+            },
+            {
+              "name": "sensitive",
+              "type": "boolean",
+              "description": "True if the message involves harassment, discrimination, grievance, resignation, medical or legal matters, or safety",
+              "required": true
+            },
+            {
+              "name": "confidence",
+              "type": "number",
+              "description": "0 to 1 confidence in the category and extracted fields",
+              "required": true
+            }
+          ]
+        },
+        "options": {
+          "systemPromptTemplate": "You classify employee self-service messages for an HR team. Never invent dates or values. Today's date is {{ $now.toISODate() }}. If the intent is unclear, use category 'other' and a low confidence."
+        }
+      },
+      "id": "ai-classify-request",
+      "name": "AI Classify Request",
+      "type": "@n8n/n8n-nodes-langchain.informationExtractor",
+      "typeVersion": 1.1,
+      "position": [
+        720,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "gpt-4o-mini"
+        },
+        "options": {
+          "temperature": 0
+        }
+      },
+      "id": "classifier-model",
+      "name": "Classifier Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        720,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.output.confidence }}",
+              "rightValue": 0.75,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            },
+            {
+              "leftValue": "={{ $json.output.sensitive }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "safe-to-automate",
+      "name": "Safe to Automate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        960,
+        300
+      ],
+      "notes": "Sensitive or low-confidence requests always go to a human."
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.output.category }}",
+                    "rightValue": "leave_request",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Leave"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.output.category }}",
+                    "rightValue": "hr_question",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "HR Question"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "Service Request"
+        }
+      },
+      "id": "route-request",
+      "name": "Route Request",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        1200,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const c = $('AI Classify Request').first().json.output;\nconst emp = $('Lookup Employee').first().json;\nconst s = new Date(c.start_date), e = new Date(c.end_date || c.start_date);\nconst valid = !isNaN(s) && !isNaN(e) && e >= s;\nlet days = 0;\nif (valid) {\n  for (let d = new Date(s); d <= e; d.setDate(d.getDate() + 1)) {\n    const w = d.getDay();\n    if (w !== 0 && w !== 6) days++;   // skip weekends; subtract company holidays if needed\n  }\n}\nconst lb = emp.leave_balance;\nconst balance = typeof lb === 'object' && lb !== null ? Number(lb[c.leave_type] ?? 0) : Number(lb ?? 0);\nreturn [{ json: { working_days: days, balance, ok: valid && days > 0 && days <= balance } }];"
+      },
+      "id": "validate-leave-request",
+      "name": "Validate Leave Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "balance-ok",
+      "name": "Balance OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1680,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendAndWait",
+        "sendTo": "={{ $('Lookup Employee').first().json.manager_email }}",
+        "subject": "=Leave approval needed: {{ $('Lookup Employee').first().json.full_name }}",
+        "message": "={{ $('Lookup Employee').first().json.full_name }} requests {{ $('AI Classify Request').first().json.output.leave_type }} leave from {{ $('AI Classify Request').first().json.output.start_date }} to {{ $('AI Classify Request').first().json.output.end_date }} ({{ $('Validate Leave Request').first().json.working_days }} working days, balance {{ $('Validate Leave Request').first().json.balance }}).\n\nNotes: {{ $('AI Classify Request').first().json.output.details }}",
+        "responseType": "approval",
+        "approvalOptions": {
+          "values": {
+            "approvalType": "double",
+            "approveLabel": "Approve",
+            "disapproveLabel": "Reject"
+          }
+        },
+        "options": {}
+      },
+      "id": "manager-approval",
+      "name": "Manager Approval",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1920,
+        -100
+      ],
+      "notes": "Pauses until the manager clicks Approve or Reject in the email. Verify parameter names in your n8n version; Slack and Teams nodes also support Send and Wait."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.data.approved }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "approved",
+      "name": "Approved?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2160,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR-HRIS.example.com/api/leave",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_TOKEN"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ employee_id: $('Lookup Employee').first().json.employee_id, leave_type: $('AI Classify Request').first().json.output.leave_type, start_date: $('AI Classify Request').first().json.output.start_date, end_date: $('AI Classify Request').first().json.output.end_date, days: $('Validate Leave Request').first().json.working_days, source: 'self-service' }) }}",
+        "options": {}
+      },
+      "id": "create-leave-in-hris",
+      "name": "Create Leave in HRIS",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2400,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "reply",
+              "value": "=Good news! Your {{ $('AI Classify Request').first().json.output.leave_type }} leave from {{ $('AI Classify Request').first().json.output.start_date }} to {{ $('AI Classify Request').first().json.output.end_date }} ({{ $('Validate Leave Request').first().json.working_days }} working days) was approved by your manager and recorded in the HR system.",
+              "type": "string"
+            },
+            {
+              "id": "a2",
+              "name": "outcome",
+              "value": "leave_approved",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "reply---leave-approved",
+      "name": "Reply - Leave Approved",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2640,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "reply",
+              "value": "=Your leave request for {{ $('AI Classify Request').first().json.output.start_date }} to {{ $('AI Classify Request').first().json.output.end_date }} was not approved by your manager. Please speak with them or reply to HR if you need help.",
+              "type": "string"
+            },
+            {
+              "id": "a2",
+              "name": "outcome",
+              "value": "leave_rejected",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "reply---leave-rejected",
+      "name": "Reply - Leave Rejected",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2400,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "reply",
+              "value": "=We could not file your leave request. Either the dates are unclear or your remaining balance ({{ $('Validate Leave Request').first().json.balance }} days) does not cover the requested days ({{ $('Validate Leave Request').first().json.working_days }}). Please resend with exact dates, e.g. 'Vacation Dec 22 to Dec 26', or contact HR.",
+              "type": "string"
+            },
+            {
+              "id": "a2",
+              "name": "outcome",
+              "value": "leave_blocked",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "reply---insufficient-balance",
+      "name": "Reply - Insufficient Balance",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1920,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "p1",
+              "name": "policy",
+              "value": "PASTE YOUR HANDBOOK / POLICY TEXT HERE (leave policy, holidays, benefits, payroll schedule, dress code, WFH rules, etc.)",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "hr-policy-knowledge-base",
+      "name": "HR Policy Knowledge Base",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1440,
+        300
+      ],
+      "notes": "Placeholder. Replace with a Google Docs / Notion / SharePoint node, or a vector store for large handbooks."
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are an HR assistant. Answer the employee's question using ONLY the policy text below. Be brief, friendly and specific. If the answer is not in the policy, say you are not sure and that HR will follow up, and do not guess. Never give legal, medical or tax advice.\n\nPOLICY:\n{{ $('HR Policy Knowledge Base').first().json.policy }}\n\nQUESTION:\n{{ $('Request Webhook').first().json.body.message }}"
+      },
+      "id": "ai-answer-policy-question",
+      "name": "AI Answer Policy Question",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.5,
+      "position": [
+        1680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "gpt-4o-mini"
+        },
+        "options": {
+          "temperature": 0.2
+        }
+      },
+      "id": "answer-model",
+      "name": "Answer Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        1680,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "reply",
+              "value": "={{ $json.text }}",
+              "type": "string"
+            },
+            {
+              "id": "a2",
+              "name": "outcome",
+              "value": "policy_answered",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "reply---policy-answer",
+      "name": "Reply - Policy Answer",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1920,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const c = $('AI Classify Request').first().json.output;\nconst map = {\n  certificate_request:   { team: 'HR Ops',  sla: '3 business days', channel: '#hr-requests' },\n  payslip_request:       { team: 'Payroll', sla: '2 business days', channel: '#hr-payroll' },\n  profile_update:        { team: 'HR Ops',  sla: '3 business days', channel: '#hr-requests' },\n  expense_reimbursement: { team: 'Finance', sla: '5 business days', channel: '#finance-requests' },\n  it_equipment:          { team: 'IT',      sla: '2 business days', channel: '#it-helpdesk' }\n};\nconst r = map[c.category] ?? { team: 'HR Ops', sla: '3 business days', channel: '#hr-requests' };\nreturn [{ json: { ticket_id: 'REQ-' + Date.now().toString(36).toUpperCase(), ...r } }];"
+      },
+      "id": "assign-ticket-and-route",
+      "name": "Assign Ticket & Route",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Tickets"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Ticket ID": "={{ $('Assign Ticket & Route').first().json.ticket_id }}",
+            "Created": "={{ $now.toISO() }}",
+            "Employee ID": "={{ $('Lookup Employee').first().json.employee_id }}",
+            "Employee": "={{ $('Lookup Employee').first().json.full_name }}",
+            "Category": "={{ $('AI Classify Request').first().json.output.category }}",
+            "Details": "={{ $('AI Classify Request').first().json.output.details }}",
+            "Owner Team": "={{ $('Assign Ticket & Route').first().json.team }}",
+            "SLA": "={{ $('Assign Ticket & Route').first().json.sla }}",
+            "Status": "Open"
+          }
+        },
+        "options": {}
+      },
+      "id": "log-ticket",
+      "name": "Log Ticket",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1680,
+        700
+      ],
+      "notes": "Create a 'Tickets' sheet with matching headers, or swap for Jira / Freshservice / Zendesk."
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "={{ $('Assign Ticket & Route').first().json.channel }}"
+        },
+        "text": "=:ticket: *{{ $('Assign Ticket & Route').first().json.ticket_id }}* ({{ $('AI Classify Request').first().json.output.category }}) from {{ $('Lookup Employee').first().json.full_name }}, {{ $('Lookup Employee').first().json.department }}\n{{ $('AI Classify Request').first().json.output.details }}\nOwner: {{ $('Assign Ticket & Route').first().json.team }} | SLA: {{ $('Assign Ticket & Route').first().json.sla }}",
+        "otherOptions": {}
+      },
+      "id": "slack---notify-owner-team",
+      "name": "Slack - Notify Owner Team",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        1920,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "reply",
+              "value": "=Your request ({{ $('AI Classify Request').first().json.output.details }}) was logged as {{ $('Assign Ticket & Route').first().json.ticket_id }} and assigned to {{ $('Assign Ticket & Route').first().json.team }}. Expected turnaround: {{ $('Assign Ticket & Route').first().json.sla }}.",
+              "type": "string"
+            },
+            {
+              "id": "a2",
+              "name": "outcome",
+              "value": "ticket_created",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "reply---ticket-created",
+      "name": "Reply - Ticket Created",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2160,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "#hr-escalations"
+        },
+        "text": "=:rotating_light: Request needs a human\nFrom: {{ $('Lookup Employee').first().json.full_name }} ({{ $('Lookup Employee').first().json.email }})\nMessage: {{ $('Request Webhook').first().json.body.message }}\nAI read: {{ JSON.stringify($json.output) }}",
+        "otherOptions": {}
+      },
+      "id": "slack---escalate-to-hr",
+      "name": "Slack - Escalate to HR",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        1200,
+        1000
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "reply",
+              "value": "We received your message and passed it to the HR team, who will follow up with you personally. For anything urgent, please contact HR directly.",
+              "type": "string"
+            },
+            {
+              "id": "a2",
+              "name": "outcome",
+              "value": "escalated",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "reply---escalated",
+      "name": "Reply - Escalated",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1440,
+        1000
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $('Lookup Employee').first().json.email }}",
+        "subject": "Update on your HR request",
+        "message": "={{ $json.reply }}",
+        "options": {}
+      },
+      "id": "notify-employee",
+      "name": "Notify Employee",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        2900,
+        300
+      ],
+      "notes": "Swap for a Slack DM or Teams message if you prefer replying in chat."
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Audit"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Timestamp": "={{ $now.toISO() }}",
+            "Employee ID": "={{ $('Lookup Employee').first().json.employee_id }}",
+            "Category": "={{ $('AI Classify Request').first().json.output.category }}",
+            "Outcome": "={{ $json.outcome }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "audit-log",
+      "name": "Audit Log",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        2900,
+        520
+      ],
+      "notes": "Logs metadata only. Avoid storing sensitive message content."
+    },
+    {
+      "parameters": {},
+      "id": "error-trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        1200
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "#hr-alerts"
+        },
+        "text": "=:rotating_light: Self-service workflow failed at {{ $json.execution.lastNodeExecuted }}: {{ $json.execution.error.message }}",
+        "otherOptions": {}
+      },
+      "id": "slack---error-alert",
+      "name": "Slack - Error Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        260,
+        1200
+      ]
+    }
+  ],
+  "connections": {
+    "Request Webhook": {
+      "main": [
+        [
+          {
+            "node": "Acknowledge Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Acknowledge Request": {
+      "main": [
+        [
+          {
+            "node": "Lookup Employee",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lookup Employee": {
+      "main": [
+        [
+          {
+            "node": "AI Classify Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Classify Request": {
+      "main": [
+        [
+          {
+            "node": "Safe to Automate?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Safe to Automate?": {
+      "main": [
+        [
+          {
+            "node": "Route Request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slack - Escalate to HR",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classifier Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Classify Request",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Request": {
+      "main": [
+        [
+          {
+            "node": "Validate Leave Request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HR Policy Knowledge Base",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Assign Ticket & Route",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Leave Request": {
+      "main": [
+        [
+          {
+            "node": "Balance OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Balance OK?": {
+      "main": [
+        [
+          {
+            "node": "Manager Approval",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reply - Insufficient Balance",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manager Approval": {
+      "main": [
+        [
+          {
+            "node": "Approved?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approved?": {
+      "main": [
+        [
+          {
+            "node": "Create Leave in HRIS",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reply - Leave Rejected",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Leave in HRIS": {
+      "main": [
+        [
+          {
+            "node": "Reply - Leave Approved",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HR Policy Knowledge Base": {
+      "main": [
+        [
+          {
+            "node": "AI Answer Policy Question",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Answer Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Answer Policy Question",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Answer Policy Question": {
+      "main": [
+        [
+          {
+            "node": "Reply - Policy Answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assign Ticket & Route": {
+      "main": [
+        [
+          {
+            "node": "Log Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Ticket": {
+      "main": [
+        [
+          {
+            "node": "Slack - Notify Owner Team",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack - Notify Owner Team": {
+      "main": [
+        [
+          {
+            "node": "Reply - Ticket Created",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack - Escalate to HR": {
+      "main": [
+        [
+          {
+            "node": "Reply - Escalated",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reply - Leave Approved": {
+      "main": [
+        [
+          {
+            "node": "Notify Employee",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Audit Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reply - Leave Rejected": {
+      "main": [
+        [
+          {
+            "node": "Notify Employee",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Audit Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reply - Insufficient Balance": {
+      "main": [
+        [
+          {
+            "node": "Notify Employee",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Audit Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reply - Policy Answer": {
+      "main": [
+        [
+          {
+            "node": "Notify Employee",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Audit Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reply - Ticket Created": {
+      "main": [
+        [
+          {
+            "node": "Notify Employee",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Audit Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reply - Escalated": {
+      "main": [
+        [
+          {
+            "node": "Notify Employee",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Audit Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Slack - Error Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Manila"
+  },
+  "pinData": {}
+}

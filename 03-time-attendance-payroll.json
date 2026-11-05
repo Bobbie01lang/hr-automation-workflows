@@ -1,0 +1,514 @@
+{
+  "name": "Time, Attendance & Payroll Hours (HR Approval)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 1,16 * *"
+            }
+          ]
+        }
+      },
+      "id": "payroll-cutoff-schedule",
+      "name": "Payroll Cutoff Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ],
+      "notes": "Runs 8:00 AM on the 1st and 16th (semi-monthly: covers 16th-end of month, and 1st-15th). Timezone is Asia/Manila in workflow settings. Change the cron for weekly or bi-weekly."
+    },
+    {
+      "parameters": {
+        "jsCode": "const now = new Date();\nconst y = now.getFullYear(), m = now.getMonth(), d = now.getDate();\nconst pad = n => String(n).padStart(2, '0');\nconst fmt = (Y, M, D) => `${Y}-${pad(M + 1)}-${pad(D)}`;\nlet start, end;\nif (d >= 16) {            // run on the 16th -> cover 1st-15th of this month\n  start = fmt(y, m, 1); end = fmt(y, m, 15);\n} else {                  // run on the 1st -> cover 16th-end of previous month\n  const last = new Date(y, m, 0);\n  start = fmt(last.getFullYear(), last.getMonth(), 16);\n  end = fmt(last.getFullYear(), last.getMonth(), last.getDate());\n}\nreturn [{ json: { period_start: start, period_end: end } }];"
+      },
+      "id": "compute-pay-period",
+      "name": "Compute Pay Period",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://YOUR-TIMEKEEPING.example.com/api/timesheets",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_TOKEN"
+            }
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "from",
+              "value": "={{ $json.period_start }}"
+            },
+            {
+              "name": "to",
+              "value": "={{ $json.period_end }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "get-timesheets",
+      "name": "Get Timesheets",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        300
+      ],
+      "notes": "Replace with Clockify / Deputy / Jibble / biometric export. Expected fields per row: employee_id, name, date, clock_in, clock_out (ISO), break_minutes, ot_approved."
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://YOUR-HRIS.example.com/api/leave",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_TOKEN"
+            }
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "from",
+              "value": "={{ $('Compute Pay Period').first().json.period_start }}"
+            },
+            {
+              "name": "to",
+              "value": "={{ $('Compute Pay Period').first().json.period_end }}"
+            },
+            {
+              "name": "status",
+              "value": "approved"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "get-approved-leave",
+      "name": "Get Approved Leave",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        720,
+        300
+      ],
+      "notes": "Expected fields: employee_id, name, date, type, days.",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://YOUR-HRIS.example.com/api/holidays",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_TOKEN"
+            }
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "from",
+              "value": "={{ $('Compute Pay Period').first().json.period_start }}"
+            },
+            {
+              "name": "to",
+              "value": "={{ $('Compute Pay Period').first().json.period_end }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "get-holidays",
+      "name": "Get Holidays",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        960,
+        300
+      ],
+      "notes": "Expected fields: date, name, type (regular/special). Or replace with a static list.",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Deterministic payroll math lives HERE (not in the AI).\nconst period = $('Compute Pay Period').first().json;\nconst punches = $('Get Timesheets').all().map(i => i.json);\nconst leaves = $('Get Approved Leave').all().map(i => i.json);\nconst holidays = new Set($('Get Holidays').all().map(i => i.json.date));\n\nconst STD_HOURS = 8;       // regular hours per day before overtime\nconst SHIFT_START = '09:00';\nconst LATE_GRACE_MIN = 10; // grace period before lateness counts\nconst MAX_HOURS = 16;      // above this = suspicious\n\nconst mins = (a, b) => Math.round((new Date(b) - new Date(a)) / 60000);\nconst byEmp = {};\nconst emp = (id, name) => (byEmp[id] ??= {\n  employee_id: id, name, days_worked: 0, regular_hours: 0, overtime_hours: 0,\n  holiday_hours: 0, late_minutes: 0, leave_days: 0, anomalies: []\n});\n\nfor (const p of punches) {\n  const e = emp(p.employee_id, p.name);\n  if (!p.clock_in || !p.clock_out) { e.anomalies.push(`Missing punch on ${p.date}`); continue; }\n  const worked = (mins(p.clock_in, p.clock_out) - (p.break_minutes ?? 60)) / 60;\n  if (worked <= 0 || worked > MAX_HOURS) {\n    e.anomalies.push(`Suspicious hours (${worked.toFixed(1)}h) on ${p.date}`); continue;\n  }\n  const ot = Math.max(worked - STD_HOURS, 0);\n  if (holidays.has(p.date)) {\n    e.holiday_hours += worked;\n  } else {\n    e.regular_hours += Math.min(worked, STD_HOURS);\n    e.overtime_hours += ot;\n  }\n  if (ot > 0 && !p.ot_approved) e.anomalies.push(`Unapproved overtime ${ot.toFixed(1)}h on ${p.date}`);\n  const late = Math.max(mins(`${p.date}T${SHIFT_START}:00`, p.clock_in) - LATE_GRACE_MIN, 0);\n  e.late_minutes += late;\n  e.days_worked += 1;\n}\n\nfor (const l of leaves) {\n  const e = emp(l.employee_id, l.name);\n  e.leave_days += Number(l.days ?? 1);\n}\n\nconst r2 = n => Math.round(n * 100) / 100;\nconst employees = Object.values(byEmp).map(e => ({\n  ...e,\n  regular_hours: r2(e.regular_hours), overtime_hours: r2(e.overtime_hours),\n  holiday_hours: r2(e.holiday_hours)\n}));\nconst anomalies = employees.flatMap(e => e.anomalies.map(issue => ({ employee_id: e.employee_id, name: e.name, issue })));\n\nreturn [{ json: {\n  period_start: period.period_start, period_end: period.period_end,\n  headcount: employees.length,\n  total_regular_hours: r2(employees.reduce((s, e) => s + e.regular_hours, 0)),\n  total_overtime_hours: r2(employees.reduce((s, e) => s + e.overtime_hours, 0)),\n  total_holiday_hours: r2(employees.reduce((s, e) => s + e.holiday_hours, 0)),\n  anomaly_count: anomalies.length,\n  anomalies, employees\n} }];"
+      },
+      "id": "calculate-hours-and-flags",
+      "name": "Calculate Hours & Flags",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        300
+      ],
+      "notes": "Tune STD_HOURS, SHIFT_START, grace period and holiday rules to your policy. Outputs HOURS only; the payroll system applies pay rates, premiums and deductions."
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are an HR payroll analyst. Summarize these timekeeping anomalies for the HR approver. Group by type (missing punch, unapproved OT, suspicious hours), list each employee once per issue type with dates, and suggest one action per group. Do NOT change or recalculate any numbers. If there are no anomalies, reply exactly: No anomalies found.\n\nPeriod: {{ $('Calculate Hours & Flags').first().json.period_start }} to {{ $('Calculate Hours & Flags').first().json.period_end }}\nAnomalies JSON:\n{{ JSON.stringify($('Calculate Hours & Flags').first().json.anomalies) }}"
+      },
+      "id": "ai-review-anomalies",
+      "name": "AI Review Anomalies",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.5,
+      "position": [
+        1440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "gpt-4o-mini"
+        },
+        "options": {
+          "temperature": 0
+        }
+      },
+      "id": "reviewer-model",
+      "name": "Reviewer Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        1440,
+        520
+      ],
+      "notes": "Swap for Anthropic/Azure/etc."
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "#hr-payroll"
+        },
+        "text": "=:moneybag: *Payroll hours ready for approval*\nPeriod: {{ $('Calculate Hours & Flags').first().json.period_start }} to {{ $('Calculate Hours & Flags').first().json.period_end }}\nHeadcount: {{ $('Calculate Hours & Flags').first().json.headcount }} | Regular: {{ $('Calculate Hours & Flags').first().json.total_regular_hours }}h | OT: {{ $('Calculate Hours & Flags').first().json.total_overtime_hours }}h | Holiday: {{ $('Calculate Hours & Flags').first().json.total_holiday_hours }}h\nAnomalies: {{ $('Calculate Hours & Flags').first().json.anomaly_count }}\n\n{{ $json.text }}\n\n:white_check_mark: Approve and send to payroll: {{ $execution.resumeUrl }}\nTo reject, fix the source data and re-run the workflow manually.",
+        "otherOptions": {}
+      },
+      "id": "slack---hr-approval-request",
+      "name": "Slack - HR Approval Request",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        1680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "resume": "webhook",
+        "httpMethod": "GET",
+        "options": {}
+      },
+      "id": "wait-for-hr-approval",
+      "name": "Wait for HR Approval",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1920,
+        300
+      ],
+      "notes": "Execution pauses until HR opens the approval link. Under Options you can set a timeout so it does not wait forever.",
+      "webhookId": "3f7c1d9e-5a42-4b8e-9a61-2d0c7e4b8f11"
+    },
+    {
+      "parameters": {
+        "jsCode": "const c = $('Calculate Hours & Flags').first().json;\nreturn c.employees.map(e => ({ json: {\n  period_start: c.period_start, period_end: c.period_end,\n  employee_id: e.employee_id, name: e.name, days_worked: e.days_worked,\n  regular_hours: e.regular_hours, overtime_hours: e.overtime_hours,\n  holiday_hours: e.holiday_hours, late_minutes: e.late_minutes,\n  leave_days: e.leave_days, anomalies: e.anomalies.join('; ')\n} }));"
+      },
+      "id": "prepare-payroll-rows",
+      "name": "Prepare Payroll Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2160,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "csv",
+        "options": {
+          "fileName": "=payroll-hours-{{ $('Calculate Hours & Flags').first().json.period_start }}_to_{{ $('Calculate Hours & Flags').first().json.period_end }}.csv"
+        }
+      },
+      "id": "convert-to-csv",
+      "name": "Convert to CSV",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        2400,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "payroll@yourcompany.com",
+        "subject": "=Approved payroll hours: {{ $('Calculate Hours & Flags').first().json.period_start }} to {{ $('Calculate Hours & Flags').first().json.period_end }}",
+        "message": "=Hi team,\n\nAttached are the HR-approved timekeeping hours for {{ $('Calculate Hours & Flags').first().json.period_start }} to {{ $('Calculate Hours & Flags').first().json.period_end }} ({{ $('Calculate Hours & Flags').first().json.headcount }} employees).\n\nPlease apply rates, premiums, statutory contributions and deductions in the payroll system.\n\nThank you.",
+        "options": {
+          "attachmentsUi": {
+            "attachmentsBinary": [
+              {
+                "property": "data"
+              }
+            ]
+          }
+        }
+      },
+      "id": "email-payroll-team",
+      "name": "Email Payroll Team",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        2640,
+        300
+      ],
+      "notes": "Swap for Outlook, or replace with a direct API call / upload to your payroll provider."
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "#hr-payroll"
+        },
+        "text": "=:outbox_tray: Approved hours for {{ $('Calculate Hours & Flags').first().json.period_start }} to {{ $('Calculate Hours & Flags').first().json.period_end }} sent to payroll.",
+        "otherOptions": {}
+      },
+      "id": "slack---payroll-sent",
+      "name": "Slack - Payroll Sent",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        2880,
+        300
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "error-trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "#hr-alerts"
+        },
+        "text": "=:rotating_light: Payroll workflow failed at {{ $json.execution.lastNodeExecuted }}: {{ $json.execution.error.message }}",
+        "otherOptions": {}
+      },
+      "id": "slack---error-alert",
+      "name": "Slack - Error Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        260,
+        720
+      ]
+    }
+  ],
+  "connections": {
+    "Payroll Cutoff Schedule": {
+      "main": [
+        [
+          {
+            "node": "Compute Pay Period",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute Pay Period": {
+      "main": [
+        [
+          {
+            "node": "Get Timesheets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Timesheets": {
+      "main": [
+        [
+          {
+            "node": "Get Approved Leave",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Approved Leave": {
+      "main": [
+        [
+          {
+            "node": "Get Holidays",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Holidays": {
+      "main": [
+        [
+          {
+            "node": "Calculate Hours & Flags",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Hours & Flags": {
+      "main": [
+        [
+          {
+            "node": "AI Review Anomalies",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Review Anomalies": {
+      "main": [
+        [
+          {
+            "node": "Slack - HR Approval Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack - HR Approval Request": {
+      "main": [
+        [
+          {
+            "node": "Wait for HR Approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait for HR Approval": {
+      "main": [
+        [
+          {
+            "node": "Prepare Payroll Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Payroll Rows": {
+      "main": [
+        [
+          {
+            "node": "Convert to CSV",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convert to CSV": {
+      "main": [
+        [
+          {
+            "node": "Email Payroll Team",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email Payroll Team": {
+      "main": [
+        [
+          {
+            "node": "Slack - Payroll Sent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reviewer Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Review Anomalies",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Slack - Error Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Manila"
+  },
+  "pinData": {}
+}
