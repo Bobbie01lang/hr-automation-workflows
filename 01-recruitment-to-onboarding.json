@@ -1,0 +1,578 @@
+{
+  "name": "Recruitment -> Onboarding (ATS to HRIS)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ats-offer-accepted",
+        "authentication": "headerAuth",
+        "options": {}
+      },
+      "id": "ats-webhook",
+      "name": "ATS Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "notes": "Connect Greenhouse / Lever / Workable / Ashby 'candidate hired' or 'offer accepted' webhook here."
+    },
+    {
+      "parameters": {
+        "jsCode": "const b = $json.body ?? $json;\nreturn [{ json: { source: b.source ?? 'ats', received_at: new Date().toISOString(), raw_text: JSON.stringify(b) } }];"
+      },
+      "id": "normalize-payload",
+      "name": "Normalize Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "text": "={{ $json.raw_text }}",
+        "attributes": {
+          "attributes": [
+            {
+              "name": "candidate_id",
+              "type": "string",
+              "description": "ATS candidate or application ID",
+              "required": true
+            },
+            {
+              "name": "first_name",
+              "type": "string",
+              "description": "Given name",
+              "required": true
+            },
+            {
+              "name": "last_name",
+              "type": "string",
+              "description": "Family name",
+              "required": true
+            },
+            {
+              "name": "personal_email",
+              "type": "string",
+              "description": "Candidate personal email",
+              "required": true
+            },
+            {
+              "name": "phone",
+              "type": "string",
+              "description": "Phone number",
+              "required": false
+            },
+            {
+              "name": "job_title",
+              "type": "string",
+              "description": "Offered job title",
+              "required": true
+            },
+            {
+              "name": "department",
+              "type": "string",
+              "description": "Hiring department",
+              "required": true
+            },
+            {
+              "name": "manager_name",
+              "type": "string",
+              "description": "Hiring manager name",
+              "required": false
+            },
+            {
+              "name": "manager_email",
+              "type": "string",
+              "description": "Hiring manager email",
+              "required": false
+            },
+            {
+              "name": "start_date",
+              "type": "string",
+              "description": "Start date in YYYY-MM-DD",
+              "required": true
+            },
+            {
+              "name": "location",
+              "type": "string",
+              "description": "Office or remote location",
+              "required": false
+            },
+            {
+              "name": "employment_type",
+              "type": "string",
+              "description": "full_time, part_time, contractor or intern",
+              "required": false
+            },
+            {
+              "name": "confidence",
+              "type": "number",
+              "description": "0 to 1 confidence that the mapping is correct and the offer is accepted",
+              "required": true
+            }
+          ]
+        },
+        "options": {
+          "systemPromptTemplate": "You map raw ATS payloads (Greenhouse, Lever, Workable, Ashby, etc.) to a canonical new-hire schema. Never invent values; leave unknown fields empty. Dates must be YYYY-MM-DD. Lower confidence if the payload does not clearly show an accepted offer."
+        }
+      },
+      "id": "ai-extract-candidate",
+      "name": "AI Extract Candidate",
+      "type": "@n8n/n8n-nodes-langchain.informationExtractor",
+      "typeVersion": 1.1,
+      "position": [
+        440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "gpt-4o-mini"
+        },
+        "options": {
+          "temperature": 0
+        }
+      },
+      "id": "extractor-model",
+      "name": "Extractor Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        440,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.output.confidence }}",
+              "rightValue": 0.8,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "validation-gate",
+      "name": "Validation Gate",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        700,
+        300
+      ],
+      "notes": "Add a second condition to require personal_email and start_date to be non-empty."
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "#recruiting-review"
+        },
+        "text": "=:warning: ATS hire event needs manual review\n```{{ JSON.stringify($json.output, null, 2) }}```",
+        "otherOptions": {}
+      },
+      "id": "slack---recruiter-review",
+      "name": "Slack - Recruiter Review",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        960,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR-HRIS.example.com/api/workers",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_TOKEN"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ first_name: $json.output.first_name, last_name: $json.output.last_name, personal_email: $json.output.personal_email, job_title: $json.output.job_title, department: $json.output.department, manager_email: $json.output.manager_email, start_date: $json.output.start_date, employment_type: $json.output.employment_type, ats_candidate_id: $json.output.candidate_id }) }}",
+        "options": {}
+      },
+      "id": "create-employee-in-hris",
+      "name": "Create Employee in HRIS",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        960,
+        300
+      ],
+      "notes": "Replace with the native Workday/BambooHR/HiBob node or API call. Capture the returned worker ID."
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Write a warm, concise welcome email (plain text, under 150 words) for a new hire.\nName: {{ $('AI Extract Candidate').item.json.output.first_name }}\nRole: {{ $('AI Extract Candidate').item.json.output.job_title }} in {{ $('AI Extract Candidate').item.json.output.department }}\nStart date: {{ $('AI Extract Candidate').item.json.output.start_date }}\nManager: {{ $('AI Extract Candidate').item.json.output.manager_name }}\nLocation: {{ $('AI Extract Candidate').item.json.output.location }}\nMention that IT will send account details before day one and that they should reply with any questions. Do not invent details. Output only the email body."
+      },
+      "id": "ai-draft-welcome-email",
+      "name": "AI Draft Welcome Email",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.5,
+      "position": [
+        1220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "gpt-4o-mini"
+        },
+        "options": {
+          "temperature": 0.3
+        }
+      },
+      "id": "email-writer-model",
+      "name": "Email Writer Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        1220,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $('AI Extract Candidate').item.json.output.personal_email }}",
+        "subject": "=Welcome to the team, {{ $('AI Extract Candidate').item.json.output.first_name }}!",
+        "message": "={{ $json.text }}",
+        "options": {}
+      },
+      "id": "send-welcome-email",
+      "name": "Send Welcome Email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1480,
+        300
+      ],
+      "notes": "Swap for Microsoft Outlook node if needed."
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Onboarding"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Candidate ID": "={{ $('AI Extract Candidate').item.json.output.candidate_id }}",
+            "Name": "={{ $('AI Extract Candidate').item.json.output.first_name }} {{ $('AI Extract Candidate').item.json.output.last_name }}",
+            "Role": "={{ $('AI Extract Candidate').item.json.output.job_title }}",
+            "Department": "={{ $('AI Extract Candidate').item.json.output.department }}",
+            "Manager": "={{ $('AI Extract Candidate').item.json.output.manager_email }}",
+            "Start Date": "={{ $('AI Extract Candidate').item.json.output.start_date }}",
+            "Contract Signed": "Pending",
+            "Equipment Ordered": "Pending",
+            "Accounts Provisioned": "Pending",
+            "Orientation Scheduled": "Pending"
+          }
+        },
+        "options": {}
+      },
+      "id": "create-onboarding-checklist",
+      "name": "Create Onboarding Checklist",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1740,
+        300
+      ],
+      "notes": "Create a sheet named 'Onboarding' with matching column headers. Or swap for Notion / Asana / Jira."
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "#new-hires"
+        },
+        "text": "=:tada: New hire confirmed: {{ $('AI Extract Candidate').item.json.output.first_name }} {{ $('AI Extract Candidate').item.json.output.last_name }} ({{ $('AI Extract Candidate').item.json.output.job_title }}, {{ $('AI Extract Candidate').item.json.output.department }}) starts {{ $('AI Extract Candidate').item.json.output.start_date }}.\nIT: order equipment | HR: send contract | Manager: {{ $('AI Extract Candidate').item.json.output.manager_email }}",
+        "otherOptions": {}
+      },
+      "id": "slack---notify-hr-it-manager",
+      "name": "Slack - Notify HR IT Manager",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        2000,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "resume": "specificTime",
+        "dateTime": "={{ new Date(new Date($('AI Extract Candidate').item.json.output.start_date).getTime() - 2*24*60*60*1000).toISOString() }}"
+      },
+      "id": "wait-until-2-days-before-start",
+      "name": "Wait Until 2 Days Before Start",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2260,
+        300
+      ],
+      "notes": "Pauses the execution until 2 days before day one. If the date is in the past it continues immediately."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR-N8N-URL/webhook/hris-lifecycle",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "YOUR_HEADER_AUTH_VALUE"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ source: 'ats-onboarding', event: 'Hire', worker_id: $('AI Extract Candidate').item.json.output.candidate_id, first_name: $('AI Extract Candidate').item.json.output.first_name, last_name: $('AI Extract Candidate').item.json.output.last_name, department: $('AI Extract Candidate').item.json.output.department, title: $('AI Extract Candidate').item.json.output.job_title, manager_email: $('AI Extract Candidate').item.json.output.manager_email, start_date: $('AI Extract Candidate').item.json.output.start_date }) }}",
+        "options": {}
+      },
+      "id": "trigger-account-provisioning",
+      "name": "Trigger Account Provisioning",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2520,
+        300
+      ],
+      "notes": "Calls the earlier 'HRIS Lifecycle -> Identity Provisioning' workflow (use its Production URL and header name)."
+    },
+    {
+      "parameters": {},
+      "id": "error-trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "#recruiting-alerts"
+        },
+        "text": "=:rotating_light: Recruitment-to-onboarding failed at {{ $json.execution.lastNodeExecuted }}: {{ $json.execution.error.message }}",
+        "otherOptions": {}
+      },
+      "id": "slack---error-alert",
+      "name": "Slack - Error Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        260,
+        720
+      ]
+    }
+  ],
+  "connections": {
+    "ATS Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Payload": {
+      "main": [
+        [
+          {
+            "node": "AI Extract Candidate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Extract Candidate": {
+      "main": [
+        [
+          {
+            "node": "Validation Gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validation Gate": {
+      "main": [
+        [
+          {
+            "node": "Create Employee in HRIS",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slack - Recruiter Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Employee in HRIS": {
+      "main": [
+        [
+          {
+            "node": "AI Draft Welcome Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Draft Welcome Email": {
+      "main": [
+        [
+          {
+            "node": "Send Welcome Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Welcome Email": {
+      "main": [
+        [
+          {
+            "node": "Create Onboarding Checklist",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Onboarding Checklist": {
+      "main": [
+        [
+          {
+            "node": "Slack - Notify HR IT Manager",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack - Notify HR IT Manager": {
+      "main": [
+        [
+          {
+            "node": "Wait Until 2 Days Before Start",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait Until 2 Days Before Start": {
+      "main": [
+        [
+          {
+            "node": "Trigger Account Provisioning",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extractor Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Extract Candidate",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email Writer Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Draft Welcome Email",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Slack - Error Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}
